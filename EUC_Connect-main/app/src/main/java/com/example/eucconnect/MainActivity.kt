@@ -1,7 +1,10 @@
 package com.example.eucconnect
 
 import android.Manifest
+import android.view.KeyEvent
 import android.bluetooth.BluetoothAdapter
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.bluetooth.BluetoothGattService
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -28,6 +31,9 @@ class MainActivity : AppCompatActivity() {
     /** Tracks the actual side-lights state. */
     private var sideLightsOn = true
 
+    /** Tracks whether the blinker loop is currently active. */
+    private var blinkerRunning = false
+
     private val requiredPermissions: Array<String>
         get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             arrayOf(
@@ -46,6 +52,15 @@ class MainActivity : AppCompatActivity() {
             startScanning()
         } else {
             Toast.makeText(this, "Bluetooth permissions are required", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun playBeep() {
+        try {
+            val toneGen = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
+            toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+        } catch (e: Exception) {
+            // ignore if audio not available
         }
     }
 
@@ -91,10 +106,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Headlight button
+        // Headlight button
         binding.btnHeadlight.setOnClickListener {
             headlightOn = !headlightOn
             bleManager.setHeadlight(headlightOn)
             updateHeadlightButton()
+            playBeep()  // beep only on manual press
         }
 
         // Side LEDs button
@@ -105,9 +122,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Blinkers button – pass current headlight state so it can be restored
+        // Blinkers button – toggle blinker loop on/off
         binding.btnBlinkers.setOnClickListener {
-            bleManager.runBlinkerSequence(headlightWasOn = headlightOn)
-            Toast.makeText(this, "Blinker sequence started!", Toast.LENGTH_SHORT).show()
+            blinkerRunning = !blinkerRunning
+            bleManager.toggleBlinker()
+            updateBlinkerButton()
         }
 
         // Bell button
@@ -151,6 +170,23 @@ class MainActivity : AppCompatActivity() {
             binding.btnHeadlight.setBackgroundColor(0xFF1E3A5F.toInt())
             binding.tvHeadlightState.text = "OFF"
             binding.tvHeadlightState.setTextColor(0xFF888888.toInt())
+        }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+            keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            bleManager.playBell()
+            return true  // consume the event so volume doesn't change
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    private fun updateBlinkerButton() {
+        if (blinkerRunning) {
+            binding.btnBlinkers.setBackgroundColor(0xFFF57F17.toInt()) // amber when active
+        } else {
+            binding.btnBlinkers.setBackgroundColor(0xFF1E3A5F.toInt()) // default blue-dark
         }
     }
 
@@ -202,8 +238,10 @@ class MainActivity : AppCompatActivity() {
                     // Reset light states for next connection
                     headlightOn = false
                     sideLightsOn = true
+                    blinkerRunning = false
                     updateHeadlightButton()
                     updateSideLightsButton()
+                    updateBlinkerButton()
                 }
             }
         }

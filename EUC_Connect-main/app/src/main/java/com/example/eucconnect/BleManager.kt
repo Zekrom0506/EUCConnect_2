@@ -21,6 +21,7 @@ class BleManager(private val context: Context) {
 
         // Token used to cancel all blinker handler callbacks
         private val BLINKER_TOKEN = Any()
+        private var blinkerActive = false
 
         private val CLIENT_CHARACTERISTIC_CONFIG_UUID: UUID =
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -491,55 +492,53 @@ class BleManager(private val context: Context) {
      *  t=4400  headlight ON
      *  t=4800  restore headlight to original state
      */
-    fun runBlinkerSequence(headlightWasOn: Boolean) {
+    fun isBlinkerActive(): Boolean = blinkerActive
+
+    fun toggleBlinker() {
         if (!isConnected()) {
             onError?.invoke("Connect to the wheel before using blinkers")
             return
         }
 
-        // Cancel any previously scheduled blinker steps
-        handler.removeCallbacksAndMessages(BLINKER_TOKEN)
-
-        var t = 0L
-
-        // Step 1 – headlight ON
-        postBlinkerStep(t) { sendCommand(InMotionProtocol.setHeadlight(true)) }
-        t += BLINK_STEP_MS
-
-        // Step 2 – side light ON
-        postBlinkerStep(t) { sendCommand(InMotionProtocol.setSideLights(true)) }
-        t += BLINK_STEP_MS
-
-        // Steps 3-10 – 4 headlight blinks (OFF / ON pairs)
-        repeat(4) {
-            postBlinkerStep(t) { sendCommand(InMotionProtocol.setHeadlight(false)) }
-            t += BLINK_STEP_MS
-            postBlinkerStep(t) { sendCommand(InMotionProtocol.setHeadlight(true)) }
-            t += BLINK_STEP_MS
+        if (blinkerActive) {
+            // Stop blinking
+            blinkerActive = false
+            handler.removeCallbacksAndMessages(BLINKER_TOKEN)
+            onCommandStatus?.invoke("Blinker stopped")
+        } else {
+            // Start blinking
+            blinkerActive = true
+            onCommandStatus?.invoke("Blinker started")
+            startBlinkerLoop()
         }
+    }
 
-        // Step 11 – side light ON (redundant but matches spec)
-        postBlinkerStep(t) { sendCommand(InMotionProtocol.setSideLights(true)) }
-        t += BLINK_STEP_MS
-
-        // Step 12 – headlight ON
-        postBlinkerStep(t) { sendCommand(InMotionProtocol.setHeadlight(true)) }
-        t += BLINK_STEP_MS
-
-        // Step 13 – restore headlight to its state before blinker was triggered
-        postBlinkerStep(t) { sendCommand(InMotionProtocol.setHeadlight(headlightWasOn)) }
-
-        onCommandStatus?.invoke("Blinker sequence started")
+    private fun startBlinkerLoop() {
+        if (!blinkerActive) return
+        // Turn headlight ON
+        sendCommand(InMotionProtocol.setHeadlight(true))
+        handler.postAtTime(
+            {
+                if (!blinkerActive) return@postAtTime
+                // Turn headlight OFF
+                sendCommand(InMotionProtocol.setHeadlight(false))
+                handler.postAtTime(
+                    {
+                        if (blinkerActive) {
+                            startBlinkerLoop() // loop again
+                        }
+                    },
+                    BLINKER_TOKEN,
+                    android.os.SystemClock.uptimeMillis() + BLINK_STEP_MS
+                )
+            },
+            BLINKER_TOKEN,
+            android.os.SystemClock.uptimeMillis() + BLINK_STEP_MS
+        )
     }
 
     /** Posts a blinker step so it can be cancelled as a group via [BLINKER_TOKEN]. */
-    private fun postBlinkerStep(delayMs: Long, action: () -> Unit) {
-        handler.postAtTime(
-            { action() },
-            BLINKER_TOKEN,
-            android.os.SystemClock.uptimeMillis() + delayMs
-        )
-    }
+
 
     private fun publishTelemetry(
         characteristic: BluetoothGattCharacteristic,
