@@ -15,6 +15,13 @@ class BleManager(private val context: Context) {
     companion object {
         private const val TAG = "BleManager"
         private const val SCAN_TIMEOUT_MS = 30_000L
+
+        // Blinker sequence timing
+        private const val BLINK_STEP_MS = 400L
+
+        // Token used to cancel all blinker handler callbacks
+        private val BLINKER_TOKEN = Any()
+
         private val CLIENT_CHARACTERISTIC_CONFIG_UUID: UUID =
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
         private val INMOTION_CLASSIC_NOTIFY_UUID: UUID =
@@ -94,9 +101,7 @@ class BleManager(private val context: Context) {
             isScanning = true
             onScanningStateChanged?.invoke(true)
             Log.d(TAG, "Scan started")
-
             handler.postDelayed(scanTimeoutRunnable, SCAN_TIMEOUT_MS)
-
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start scan", e)
             onError?.invoke("Failed to start scan: ${e.message}")
@@ -220,7 +225,10 @@ class BleManager(private val context: Context) {
                             properties.add("WRITE")
                         if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0)
                             properties.add("NOTIFY")
-                        Log.d(TAG, "  Char: ${characteristic.uuid} [${properties.joinToString(", ")}]")
+                        Log.d(
+                            TAG,
+                            "  Char: ${characteristic.uuid} [${properties.joinToString(", ")}]"
+                        )
                     }
                 }
 
@@ -294,13 +302,14 @@ class BleManager(private val context: Context) {
             for (characteristic in service.characteristics) {
                 if (shouldSubscribe(characteristic)) {
                     gatt.setCharacteristicNotification(characteristic, true)
-                    characteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID)?.let { descriptor ->
-                        writeDescriptor(
-                            gatt,
-                            descriptor,
-                            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                        )
-                    }
+                    characteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID)
+                        ?.let { descriptor ->
+                            writeDescriptor(
+                                gatt,
+                                descriptor,
+                                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                            )
+                        }
                 } else if (characteristic.uuid == BATTERY_LEVEL_UUID &&
                     characteristic.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0
                 ) {
@@ -311,7 +320,8 @@ class BleManager(private val context: Context) {
     }
 
     private fun shouldSubscribe(characteristic: BluetoothGattCharacteristic): Boolean {
-        val canNotify = characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
+        val canNotify =
+            characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
         if (!canNotify) return false
 
         return characteristic.uuid == INMOTION_CLASSIC_NOTIFY_UUID ||
@@ -330,9 +340,7 @@ class BleManager(private val context: Context) {
                 .firstOrNull { it.uuid == INMOTION_V2_WRITE_UUID && it.canWriteCommand() }
             ?: services
                 .flatMap { it.characteristics }
-            .firstOrNull { characteristic ->
-                characteristic.canWriteCommand()
-            }
+                .firstOrNull { characteristic -> characteristic.canWriteCommand() }
             ?: services
                 .flatMap { it.characteristics }
                 .firstOrNull { characteristic ->
@@ -371,7 +379,8 @@ class BleManager(private val context: Context) {
             } else {
                 BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             }
-        isWritingCommand = characteristic.writeType == BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        isWritingCommand =
+            characteristic.writeType == BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
 
         val accepted = writeCharacteristic(
             gatt = gatt,
@@ -421,7 +430,11 @@ class BleManager(private val context: Context) {
         writeType: Int
     ): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(characteristic, value, writeType) == BluetoothStatusCodes.SUCCESS
+            gatt.writeCharacteristic(
+                characteristic,
+                value,
+                writeType
+            ) == BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             characteristic.value = value
@@ -462,24 +475,76 @@ class BleManager(private val context: Context) {
         }
     }
 
-    fun blinkSideLights() {
+    /**
+     * Blinker sequence:
+     *  t=0     headlight ON
+     *  t=400   side light ON
+     *  t=800   headlight OFF  (blink 1 start)
+     *  t=1200  headlight ON   (blink 1 end)
+     *  t=1600  headlight OFF  (blink 2 start)
+     *  t=2000  headlight ON   (blink 2 end)
+     *  t=2400  headlight OFF  (blink 3 start)
+     *  t=2800  headlight ON   (blink 3 end)
+     *  t=3200  headlight OFF  (blink 4 start)
+     *  t=3600  headlight ON   (blink 4 end)
+     *  t=4000  side light ON
+     *  t=4400  headlight ON
+     *  t=4800  restore headlight to original state
+     */
+    fun runBlinkerSequence(headlightWasOn: Boolean) {
         if (!isConnected()) {
-            onError?.invoke("Connect to the wheel before blinking lights")
+            onError?.invoke("Connect to the wheel before using blinkers")
             return
         }
 
-        repeat(6) { index ->
-            handler.postDelayed({
-                sendCommand(InMotionProtocol.setSideLights(index % 2 == 0))
-            }, index * 300L)
+        // Cancel any previously scheduled blinker steps
+        handler.removeCallbacksAndMessages(BLINKER_TOKEN)
+
+        var t = 0L
+
+        // Step 1 – headlight ON
+        postBlinkerStep(t) { sendCommand(InMotionProtocol.setHeadlight(true)) }
+        t += BLINK_STEP_MS
+
+        // Step 2 – side light ON
+        postBlinkerStep(t) { sendCommand(InMotionProtocol.setSideLights(true)) }
+        t += BLINK_STEP_MS
+
+        // Steps 3-10 – 4 headlight blinks (OFF / ON pairs)
+        repeat(4) {
+            postBlinkerStep(t) { sendCommand(InMotionProtocol.setHeadlight(false)) }
+            t += BLINK_STEP_MS
+            postBlinkerStep(t) { sendCommand(InMotionProtocol.setHeadlight(true)) }
+            t += BLINK_STEP_MS
         }
-        handler.postDelayed({
-            sendCommand(InMotionProtocol.setSideLights(true))
-        }, 1_800L)
-        onCommandStatus?.invoke("Blinker command sequence sent")
+
+        // Step 11 – side light ON (redundant but matches spec)
+        postBlinkerStep(t) { sendCommand(InMotionProtocol.setSideLights(true)) }
+        t += BLINK_STEP_MS
+
+        // Step 12 – headlight ON
+        postBlinkerStep(t) { sendCommand(InMotionProtocol.setHeadlight(true)) }
+        t += BLINK_STEP_MS
+
+        // Step 13 – restore headlight to its state before blinker was triggered
+        postBlinkerStep(t) { sendCommand(InMotionProtocol.setHeadlight(headlightWasOn)) }
+
+        onCommandStatus?.invoke("Blinker sequence started")
     }
 
-    private fun publishTelemetry(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+    /** Posts a blinker step so it can be cancelled as a group via [BLINKER_TOKEN]. */
+    private fun postBlinkerStep(delayMs: Long, action: () -> Unit) {
+        handler.postAtTime(
+            { action() },
+            BLINKER_TOKEN,
+            android.os.SystemClock.uptimeMillis() + delayMs
+        )
+    }
+
+    private fun publishTelemetry(
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray
+    ) {
         if (characteristic.uuid == INMOTION_CLASSIC_NOTIFY_UUID ||
             characteristic.uuid == INMOTION_V2_NOTIFY_UUID
         ) {
@@ -523,6 +588,7 @@ class BleManager(private val context: Context) {
     fun cleanup() {
         stopScan()
         stopTelemetryPolling()
+        handler.removeCallbacksAndMessages(BLINKER_TOKEN)
         bluetoothGatt?.let { gatt ->
             gatt.disconnect()
             gatt.close()
@@ -531,4 +597,6 @@ class BleManager(private val context: Context) {
         commandCharacteristic = null
         handler.removeCallbacksAndMessages(null)
     }
+
+
 }

@@ -106,4 +106,25 @@ object InMotionProtocol {
         }
         return check.toByte()
     }
+    // In InmotionProtocol.kt
+    fun createLedCommand(mode: Int): ByteArray {
+        val command = ByteArray(20)
+        command[0] = 0xAA.toByte()
+        command[1] = 0xAA.toByte()
+        command[2] = 0x13.toByte() // LED Control Command for V8
+        command[3] = mode.toByte() // The pattern ID
+
+        // Fill 4-18 with 0
+        for (i in 4..18) command[i] = 0x00
+
+        // Calculate Checksum
+        var checksum: Int = 0
+        for (i in 0..18) {
+            checksum += command[i].toInt() and 0xFF
+        }
+        command[19] = (checksum and 0xFF).toByte()
+
+        return command
+    }
+
 }

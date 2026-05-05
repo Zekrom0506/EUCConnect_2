@@ -2,7 +2,6 @@ package com.example.eucconnect
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattService
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -22,9 +21,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var bleManager: BleManager
     private lateinit var deviceAdapter: DeviceAdapter
+
+    /** Tracks the actual headlight state (toggled by the user via the headlight button). */
     private var headlightOn = false
+
+    /** Tracks the actual side-lights state. */
     private var sideLightsOn = true
-    private var lastAutoBellMs = 0L
 
     private val requiredPermissions: Array<String>
         get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -43,11 +45,7 @@ class MainActivity : AppCompatActivity() {
         if (allGranted) {
             startScanning()
         } else {
-            Toast.makeText(
-                this,
-                "Bluetooth permissions are required",
-                Toast.LENGTH_LONG
-            ).show()
+            Toast.makeText(this, "Bluetooth permissions are required", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -69,17 +67,16 @@ class MainActivity : AppCompatActivity() {
         bleManager = BleManager(this)
         setupBleCallbacks()
 
-        deviceAdapter = DeviceAdapter { device ->
-            onDeviceClicked(device)
-        }
+        deviceAdapter = DeviceAdapter { device -> onDeviceClicked(device) }
 
         binding.rvDevices.apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
             adapter = deviceAdapter
         }
 
+        // Scan / Stop Scan button
         binding.btnScan.setOnClickListener {
-            if (binding.btnScan.text == "Stop Scanning") {
+            if (binding.btnScan.text == "Stop Scan") {
                 bleManager.stopScan()
             } else {
                 deviceAdapter.clear()
@@ -88,35 +85,88 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Disconnect button
         binding.btnDisconnect.setOnClickListener {
             bleManager.disconnect()
         }
 
+        // Headlight button
         binding.btnHeadlight.setOnClickListener {
             headlightOn = !headlightOn
             bleManager.setHeadlight(headlightOn)
-            binding.btnHeadlight.text = if (headlightOn) "Headlight On" else "Headlight"
+            updateHeadlightButton()
         }
 
+        // Side LEDs button
         binding.btnSideLights.setOnClickListener {
             sideLightsOn = !sideLightsOn
             bleManager.setSideLights(sideLightsOn)
-            binding.btnSideLights.text = if (sideLightsOn) "Side LEDs On" else "Side LEDs"
+            updateSideLightsButton()
         }
 
+        // Blinkers button – pass current headlight state so it can be restored
         binding.btnBlinkers.setOnClickListener {
-            bleManager.blinkSideLights()
+            bleManager.runBlinkerSequence(headlightWasOn = headlightOn)
+            Toast.makeText(this, "Blinker sequence started!", Toast.LENGTH_SHORT).show()
         }
 
+        // Bell button
         binding.btnBell.setOnClickListener {
             bleManager.playBell()
+            Toast.makeText(this, "Ding ding!", Toast.LENGTH_SHORT).show()
         }
+
+        // Start in disconnected state
+        showScanPanel()
+        setWheelControlsEnabled(false)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         bleManager.cleanup()
     }
+
+    // ── UI panel helpers ─────────────────────────────────────────────────────
+
+    /** Show the device-scan list; hide the connected controls panel. */
+    private fun showScanPanel() {
+        binding.layoutScanPanel.visibility = View.VISIBLE
+        binding.layoutConnectedPanel.visibility = View.GONE
+    }
+
+    /** Hide the device-scan list; show the connected controls panel. */
+    private fun showConnectedPanel() {
+        binding.layoutScanPanel.visibility = View.GONE
+        binding.layoutConnectedPanel.visibility = View.VISIBLE
+    }
+
+    // ── Button appearance helpers ─────────────────────────────────────────────
+
+    private fun updateHeadlightButton() {
+        if (headlightOn) {
+            binding.btnHeadlight.setBackgroundColor(0xFF0D47A1.toInt())
+            binding.tvHeadlightState.text = "ON"
+            binding.tvHeadlightState.setTextColor(0xFF4CAF50.toInt())
+        } else {
+            binding.btnHeadlight.setBackgroundColor(0xFF1E3A5F.toInt())
+            binding.tvHeadlightState.text = "OFF"
+            binding.tvHeadlightState.setTextColor(0xFF888888.toInt())
+        }
+    }
+
+    private fun updateSideLightsButton() {
+        if (sideLightsOn) {
+            binding.btnSideLights.setBackgroundColor(0xFF0D47A1.toInt())
+            binding.tvSideLightsState.text = "ON"
+            binding.tvSideLightsState.setTextColor(0xFF4CAF50.toInt())
+        } else {
+            binding.btnSideLights.setBackgroundColor(0xFF1E3A5F.toInt())
+            binding.tvSideLightsState.text = "OFF"
+            binding.tvSideLightsState.setTextColor(0xFF888888.toInt())
+        }
+    }
+
+    // ── BLE callbacks ─────────────────────────────────────────────────────────
 
     private fun setupBleCallbacks() {
 
@@ -131,39 +181,47 @@ class MainActivity : AppCompatActivity() {
         bleManager.onConnectionStateChanged = { connected, deviceName ->
             runOnUiThread {
                 if (connected) {
-                    binding.tvStatus.text = "Connected to $deviceName"
+                    binding.tvStatus.text = "✅ Connected to $deviceName"
                     binding.tvStatus.setTextColor(0xFF4CAF50.toInt())
                     binding.btnDisconnect.isEnabled = true
                     setWheelControlsEnabled(true)
-                    Toast.makeText(this, "Connected to $deviceName!", Toast.LENGTH_SHORT).show()
+                    showConnectedPanel()           // ← switch panel
+                    Toast.makeText(
+                        this,
+                        "Connected to $deviceName!",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 } else {
-                    binding.tvStatus.text = "Disconnected from $deviceName"
+                    binding.tvStatus.text = "❌ Disconnected"
                     binding.tvStatus.setTextColor(0xFFFF5722.toInt())
                     binding.btnDisconnect.isEnabled = false
                     setWheelControlsEnabled(false)
-                    binding.tvServicesTitle.visibility = View.GONE
-                    binding.tvServices.visibility = View.GONE
-                    binding.tvRawPacket.text = "Raw packet: --"
+                    showScanPanel()                // ← switch panel back
                     binding.tvSpeedValue.text = "-- km/h"
+                    binding.tvBatteryValue.text = "--%"
+                    // Reset light states for next connection
+                    headlightOn = false
+                    sideLightsOn = true
+                    updateHeadlightButton()
+                    updateSideLightsButton()
                 }
-            }
-        }
-
-        bleManager.onServicesDiscovered = { services ->
-            runOnUiThread {
-                displayServices(services)
             }
         }
 
         bleManager.onTelemetryPacket = { packet ->
             runOnUiThread {
-                displayTelemetry(packet)
+                packet.speedKmh?.let { speed ->
+                    binding.tvSpeedValue.text = String.format("%.1f km/h", speed)
+                }
+                packet.batteryPercent?.let { percent ->
+                    binding.tvBatteryValue.text = "$percent%"
+                }
             }
         }
 
         bleManager.onError = { error ->
             runOnUiThread {
-                binding.tvStatus.text = "Error: $error"
+                binding.tvStatus.text = "⚠ $error"
                 binding.tvStatus.setTextColor(0xFFFF5722.toInt())
                 Toast.makeText(this, error, Toast.LENGTH_SHORT).show()
             }
@@ -178,12 +236,12 @@ class MainActivity : AppCompatActivity() {
         bleManager.onScanningStateChanged = { scanning ->
             runOnUiThread {
                 if (scanning) {
-                    binding.btnScan.text = "Stop Scanning"
+                    binding.btnScan.text = "Stop Scan"
                     binding.progressScanning.visibility = View.VISIBLE
-                    binding.tvStatus.text = "Scanning..."
+                    binding.tvStatus.text = "🔍 Scanning..."
                     binding.tvStatus.setTextColor(0xFF2196F3.toInt())
                 } else {
-                    binding.btnScan.text = "Start Scanning"
+                    binding.btnScan.text = "Scan"
                     binding.progressScanning.visibility = View.GONE
                     if (binding.tvStatus.text.toString().contains("Scanning")) {
                         binding.tvStatus.text = "Scan complete"
@@ -193,6 +251,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
+    // ── Navigation helpers ────────────────────────────────────────────────────
 
     private fun checkPermissionsAndScan() {
         if (!bleManager.isBluetoothEnabled()) {
@@ -232,60 +292,15 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun displayServices(services: List<BluetoothGattService>) {
-        binding.tvServicesTitle.visibility = View.VISIBLE
-        binding.tvServices.visibility = View.VISIBLE
-
-        val sb = StringBuilder()
-        for (service in services) {
-            sb.appendLine("Service: ${service.uuid}")
-            for (char in service.characteristics) {
-                val props = mutableListOf<String>()
-                if (char.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0)
-                    props.add("READ")
-                if (char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0)
-                    props.add("WRITE")
-                if (char.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0)
-                    props.add("NOTIFY")
-                sb.appendLine("  ${char.uuid} [${props.joinToString(",")}]")
-            }
-        }
-        binding.tvServices.text = sb.toString()
-        binding.tvServices.movementMethod = android.text.method.ScrollingMovementMethod()
-    }
-
-    private fun displayTelemetry(packet: TelemetryPacket) {
-        binding.tvRawPacket.text = "Raw packet: ${packet.rawHex}"
-
-        packet.speedKmh?.let { speed ->
-            binding.tvSpeedValue.text = String.format("%.1f km/h", speed)
-            playBellIfEnabled()
-        }
-
-        packet.batteryPercent?.let { percent ->
-            binding.tvBatteryValue.text = "$percent%"
-        }
-
-        packet.remainingRangeKm?.let { rangeKm ->
-            binding.tvRemainingValue.text = String.format("%.1f km", rangeKm)
-        }
-    }
-
     private fun setWheelControlsEnabled(enabled: Boolean) {
+        val alpha = if (enabled) 1.0f else 0.4f
         binding.btnHeadlight.isEnabled = enabled
+        binding.btnHeadlight.alpha = alpha
         binding.btnSideLights.isEnabled = enabled
+        binding.btnSideLights.alpha = alpha
         binding.btnBlinkers.isEnabled = enabled
+        binding.btnBlinkers.alpha = alpha
         binding.btnBell.isEnabled = enabled
-        binding.switchBellOnMove.isEnabled = enabled
-    }
-
-    private fun playBellIfEnabled() {
-        if (!binding.switchBellOnMove.isChecked) return
-
-        val now = System.currentTimeMillis()
-        if (now - lastAutoBellMs > 15_000L) {
-            lastAutoBellMs = now
-            bleManager.playBell()
-        }
+        binding.btnBell.alpha = alpha
     }
 }
